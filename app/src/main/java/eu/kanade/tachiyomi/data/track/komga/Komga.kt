@@ -85,7 +85,12 @@ class Komga(id: Long) : BaseTracker(id, "Komga"), EnhancedTracker {
      */
     suspend fun pullBookReadProgress(bookUrl: String): KomgaBookProgress = api.getBookReadProgress(bookUrl)
 
-    suspend fun pushBookReadProgress(bookUrl: String, page: Int) = api.updateBookReadProgress(bookUrl, page)
+    suspend fun pushBookReadProgress(bookUrl: String, page: Int) {
+        // A negative page would still convert to a Komga-legal 1-indexed value on the wire
+        // (KomgaApi's +1), so this guard must live here, not in KomgaApi, to catch it.
+        require(page >= 0) { "page must not be negative: $page" }
+        api.updateBookReadProgress(bookUrl, page)
+    }
 
     override suspend fun login(username: String, password: String) {
         saveCredentials("user", "pass")

@@ -1,6 +1,8 @@
 package eu.kanade.tachiyomi.data.track.komga
 
 import io.kotest.matchers.shouldBe
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
 
 class KomgaPageProgressTest {
@@ -47,7 +49,10 @@ class KomgaPageProgressTest {
     fun `absent remote progress is an explicit reset overriding forward-only, and lifts suppression`() {
         val session = KomgaChapterSession()
 
-        // Remote is "absent" (e.g. marked unread via Komga's UI), even though local is way ahead.
+        // Mid-session case (ticket 08): the reader has already read forward to page 50 within
+        // this session by the time the reset resolves. Reset (unlike JumpTo) carries no page to
+        // jump to, so the caller can only ever clear stored progress here - it cannot move the
+        // live on-screen page, which is what keeps a mid-session reset from silently rewinding it.
         val action = session.onPullResolved(KomgaPullResult.Absent, currentPage = 50)
 
         action shouldBe ReconciliationAction.Reset
@@ -62,6 +67,23 @@ class KomgaPageProgressTest {
         // No timeout concept here: however long the pull took, resolving successfully lifts
         // suppression and yields the same reconciliation decision as an immediate resolution.
         val action = session.onPullResolved(KomgaPullResult.Recorded(page = 7), currentPage = 3)
+
+        action shouldBe ReconciliationAction.JumpTo(7)
+        session.isPushSuppressed shouldBe false
+    }
+
+    @Test
+    fun `resolution timing has no bearing on the outcome, since the pull is fire-and-forget`() = runTest {
+        // Ticket 07's decision: the reader never visibly waits/blocks on the pull, so there is no
+        // "UI-facing timeout" to race against. Model an arbitrarily slow network call and confirm
+        // the elapsed time changes nothing about suppression lift or reconciliation.
+        val session = KomgaChapterSession()
+        val slowPull = suspend {
+            delay(30_000)
+            KomgaPullResult.Recorded(page = 7)
+        }
+
+        val action = session.onPullResolved(slowPull(), currentPage = 3)
 
         action shouldBe ReconciliationAction.JumpTo(7)
         session.isPushSuppressed shouldBe false

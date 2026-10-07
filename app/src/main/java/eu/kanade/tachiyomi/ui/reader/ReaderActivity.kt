@@ -138,7 +138,7 @@ class ReaderActivity : BaseActivity() {
 
     private var menuToggleToast: Toast? = null
     private var readingModeToast: Toast? = null
-    private var komgaSyncToast: Toast? = null
+    private var komgaReconciliationToast: Toast? = null
     private val displayRefreshHost = DisplayRefreshHost()
 
     private val windowInsetsController by lazy { WindowInsetsControllerCompat(window, window.decorView) }
@@ -248,12 +248,10 @@ class ReaderActivity : BaseActivity() {
                     is ReaderViewModel.Event.SetCoverResult -> {
                         onSetAsCoverResult(event.result)
                     }
-                    is ReaderViewModel.Event.KomgaProgressSynced -> {
+                    is ReaderViewModel.Event.KomgaProgressReconciled -> {
                         moveToPageIndex(event.page)
-                        if (event.showToast) {
-                            komgaSyncToast?.cancel()
-                            komgaSyncToast = toast(MR.strings.komga_synced_progress)
-                        }
+                        komgaReconciliationToast?.cancel()
+                        komgaReconciliationToast = toast(MR.strings.komga_reconciled_progress)
                     }
                 }
             }
@@ -356,7 +354,7 @@ class ReaderActivity : BaseActivity() {
         config = null
         menuToggleToast?.cancel()
         readingModeToast?.cancel()
-        komgaSyncToast?.cancel()
+        komgaReconciliationToast?.cancel()
     }
 
     override fun onPause() {
