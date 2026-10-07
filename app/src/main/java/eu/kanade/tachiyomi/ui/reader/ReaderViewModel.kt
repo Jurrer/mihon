@@ -45,6 +45,7 @@ import eu.kanade.tachiyomi.data.track.komga.KomgaPagePushCoordinator
 import eu.kanade.tachiyomi.data.track.komga.KomgaPullResult
 import eu.kanade.tachiyomi.data.track.komga.KomgaPushRequest
 import eu.kanade.tachiyomi.data.track.komga.ReconciliationAction
+import eu.kanade.tachiyomi.source.Source
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.ui.reader.loader.ChapterLoader
@@ -70,7 +71,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
@@ -101,7 +101,6 @@ import tachiyomi.domain.track.interactor.GetTracks
 import tachiyomi.source.local.image.LocalCoverManager
 import tachiyomi.source.local.isLocal
 import java.util.Date
-import kotlin.getValue
 import kotlin.time.Clock
 
 /** How long to wait for more page changes before pushing Komga page-level progress. */
@@ -172,6 +171,12 @@ class ReaderViewModel(
         get() = state.value.manga
 
     /**
+     * The source of the manga loaded in the reader. Null until it has been resolved.
+     */
+    val source: Source?
+        get() = state.value.source
+
+    /**
      * The chapter id of the currently loaded chapter. Used to restore from process kill.
      */
     private var chapterId = savedState.get<Long>("chapter_id") ?: -1L
@@ -213,6 +218,13 @@ class ReaderViewModel(
     private val chapterList by lazy {
         val manga = manga!!
         val chapters = runBlocking { getChaptersByMangaId.await(manga.id, applyScanlatorFilter = true) }
+            .let { filtered ->
+                if (filtered.any { it.id == chapterId }) {
+                    filtered
+                } else {
+                    filtered + unfilteredChapterList.filter { it.id == chapterId }
+                }
+            }
 
         val selectedChapter = chapters.find { it.id == chapterId }
             ?: error("Requested chapter of id $chapterId not found in chapter list")
@@ -281,7 +293,7 @@ class ReaderViewModel(
             .map(::ReaderChapter)
     }
 
-    private val incognitoMode: Boolean by lazy { getIncognitoState.await(manga?.source) }
+    private var incognitoMode: Boolean = false
     private val downloadAheadAmount = downloadPreferences.autoDownloadWhileReading.get()
 
     // Komga page-level progress side channel (ADR-0001).
@@ -350,14 +362,13 @@ class ReaderViewModel(
         withIOContext {
             try {
                 val manga = getManga.await(mangaId) ?: error("Requested manga of id $mangaId not found")
-                sourceManager.isInitialized.first { it }
-                mutableState.update { it.copy(manga = manga) }
+                val source = sourceManager.getOrStub(manga.source)
+                incognitoMode = getIncognitoState.await(manga.source)
+                mutableState.update { it.copy(manga = manga, source = source) }
                 if (chapterId == -1L) chapterId = initialChapterId
 
                 komgaTrackingEnabled = trackerManager.komga.isLoggedIn &&
                     getTracks.await(manga.id).any { it.trackerId == trackerManager.komga.id }
-
-                val source = sourceManager.getOrStub(manga.source)
                 loader = ChapterLoader(context, downloadManager, downloadProvider, chapterCache, manga, source)
 
                 loadChapter(loader!!, chapterList.first { chapterId == it.chapter.id })
@@ -471,13 +482,13 @@ class ReaderViewModel(
         if (chapter.pageLoader?.isLocal == false) {
             val manga = manga ?: return
             val dbChapter = chapter.chapter
-            val isDownloaded = downloadManager.isChapterDownloaded(
+            val source = state.value.source ?: return
+            val isDownloaded = downloadManager.isChapterDownloadedOnDisk(
                 dbChapter.name,
                 dbChapter.scanlator,
                 dbChapter.url,
                 manga.title,
-                manga.source,
-                skipCache = true,
+                source,
             )
             if (isDownloaded) {
                 chapter.state = ReaderChapter.State.Wait
@@ -625,11 +636,10 @@ class ReaderViewModel(
             }
 
             updateChapter.await(
-                ChapterUpdate(
-                    id = readerChapter.chapter.id!!,
-                    read = readerChapter.chapter.read,
-                    lastPageRead = readerChapter.chapter.last_page_read.toLong(),
-                ),
+                ChapterUpdate(readerChapter.chapter.id!!) {
+                    read = readerChapter.chapter.read
+                    lastPageRead = readerChapter.chapter.last_page_read.toLong()
+                },
             )
         }
     }
@@ -743,7 +753,7 @@ class ReaderViewModel(
                     chapter.isRecognizedNumber &&
                     chapter.chapterNumber.toFloat() == readerChapter.chapter.chapter_number
                 ) {
-                    ChapterUpdate(id = chapter.id, read = true)
+                    ChapterUpdate(chapter.id) { read = true }
                 } else {
                     null
                 }
@@ -765,9 +775,9 @@ class ReaderViewModel(
             val chapterId = readerChapter.chapter.id!!
             val endTime = Date()
             val sessionReadDuration = chapterReadStartTime?.let { endTime.time - it } ?: 0
+            chapterReadStartTime = null
 
             upsertHistory.await(HistoryUpdate(chapterId, endTime, sessionReadDuration))
-            chapterReadStartTime = null
         }
     }
 
@@ -794,7 +804,7 @@ class ReaderViewModel(
         return state.value.currentChapter
     }
 
-    fun getSource() = manga?.source?.let { sourceManager.getOrStub(it) } as? HttpSource
+    fun getSource() = state.value.source as? HttpSource
 
     fun getChapterUrl(): String? {
         val sChapter = getCurrentChapter()?.chapter ?: return null
@@ -818,10 +828,9 @@ class ReaderViewModel(
 
         viewModelScope.launchNonCancellable {
             updateChapter.await(
-                ChapterUpdate(
-                    id = chapter.id!!,
-                    bookmark = bookmarked,
-                ),
+                ChapterUpdate(chapter.id!!) {
+                    bookmark = bookmarked
+                },
             )
         }
 
@@ -1114,6 +1123,7 @@ class ReaderViewModel(
     @Immutable
     data class State(
         val manga: Manga? = null,
+        val source: Source? = null,
         val initError: Throwable? = null,
         val viewerChapters: ViewerChapters? = null,
         val bookmarked: Boolean = false,
